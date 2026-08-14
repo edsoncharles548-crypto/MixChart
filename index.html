@@ -111,10 +111,20 @@
   .fade-in { animation: fadeIn 0.2s ease-out; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   .list-body::-webkit-scrollbar, .messages::-webkit-scrollbar { display: none; }
+
+  /* ---- toast (kiashiria cha ujumbe mpya) ---- */
+  #toast-container { position: fixed; top: 12px; left: 0; right: 0; z-index: 999; display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+  .toast { background: var(--ink); color: white; font-size: 13px; padding: 10px 16px; border-radius: 999px; box-shadow: 0 4px 14px rgba(0,0,0,0.25); max-width: 88%; text-align: center; opacity: 0; transform: translateY(-10px); transition: opacity 0.2s, transform 0.2s; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  /* ---- delete message ---- */
+  .bubble .delete-btn { font-size: 11px; opacity: 0.75; margin-left: 6px; background: none; color: inherit; padding: 0; }
+  .bubble.deleted p { font-style: italic; opacity: 0.6; }
 </style>
 </head>
 <body>
 <div id="root"></div>
+<div id="toast-container"></div>
 
 <script>
 "use strict";
@@ -155,6 +165,35 @@ function speak(text, langCode) {
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = (LANGS[langCode] || LANGS.en).speech;
   window.speechSynthesis.speak(utter);
+}
+
+/* ---- Kiashiria cha ujumbe mpya: toast + sauti fupi ---- */
+const toastContainer = document.getElementById("toast-container");
+function showToast(text) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = text;
+  toastContainer.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 250);
+  }, 2800);
+}
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.25);
+  } catch (e) { /* audio not available, ignore */ }
 }
 
 /* ================= Global State ================= */
@@ -491,7 +530,16 @@ async function renderChatListScreen() {
   await refreshList();
 
   const ch = sb.channel("convo-list-" + user.id)
-    .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, refreshList)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async (payload) => {
+      if (payload.new.sender_id !== user.id) {
+        playBeep();
+        const { data: senderUser } = await sb.from("users").select("name").eq("id", payload.new.sender_id).single();
+        showToast(`Ujumbe mpya kutoka ${senderUser ? senderUser.name : "mtu"}`);
+      }
+      refreshList();
+    })
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, refreshList)
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, refreshList)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "conversations" }, refreshList)
     .subscribe();
   screenChannels.push(ch);
@@ -572,6 +620,14 @@ async function renderChatScreen() {
     return `<span class="ticks ${read ? "read" : ""}">${read ? "✓✓" : "✓"}</span>`;
   }
 
+  async function deleteMessage(id) {
+    if (!confirm("Una uhakika unataka kufuta ujumbe huu?")) return;
+    const { error } = await sb.from("messages").delete().eq("id", id);
+    if (error) { alert("Imeshindikana kufuta: " + error.message); return; }
+    messages = messages.filter((m) => String(m.id) !== String(id));
+    renderMessages();
+  }
+
   function bubbleHtml(m) {
     const isMine = m.sender_id === user.id;
     const mainText = (m.translations && m.translations[myLang]) || m.original_text;
@@ -587,6 +643,7 @@ async function renderChatScreen() {
             <span class="meta-time">${timeAgo(m.created_at)}</span>
             ${tickIcon(m)}
             <button class="speak-btn" data-id="${m.id}">🔊</button>
+            ${isMine ? `<button class="delete-btn" data-id="${m.id}">🗑</button>` : ""}
           </div>
         </div>
       </div>
@@ -611,6 +668,9 @@ async function renderChatScreen() {
           const mainText = (m.translations && m.translations[myLang]) || m.original_text;
           speak(isShowingOriginal ? m.original_text : mainText, isShowingOriginal ? m.original_language : myLang);
         });
+      });
+      messagesEl.querySelectorAll(".delete-btn").forEach((btn) => {
+        btn.addEventListener("click", () => deleteMessage(btn.dataset.id));
       });
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -716,6 +776,10 @@ async function renderChatScreen() {
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages", filter: `conversation_id=eq.${conversation.id}` }, (payload) => {
       const idx = messages.findIndex((m) => m.id === payload.new.id);
       if (idx >= 0) { messages[idx] = payload.new; renderMessages(); }
+    })
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages", filter: `conversation_id=eq.${conversation.id}` }, (payload) => {
+      messages = messages.filter((m) => String(m.id) !== String(payload.old.id));
+      renderMessages();
     })
     .subscribe();
   screenChannels.push(msgChannel);
