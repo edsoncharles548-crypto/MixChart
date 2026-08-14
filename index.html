@@ -241,8 +241,7 @@ function render() {
 
 /* ================= Auth Screen (Phone + OTP) ================= */
 function renderAuthScreen() {
-  let step = "phone"; // phone -> otp -> profile (new users only)
-  let phone = "";
+  let mode = "login"; // login | signup
   let lang = "sw";
 
   const wrap = document.createElement("div");
@@ -255,153 +254,115 @@ function renderAuthScreen() {
           <h1 class="auth-title">Poa Chat</h1>
           <p class="auth-sub">Ongea kwa lugha yako, wasikilizaji waelewe kwa yao.</p>
         </div>
-        <div class="card" id="auth-card"></div>
+        <div class="card">
+          <div class="tabbar">
+            <button data-mode="login" class="active">Ingia</button>
+            <button data-mode="signup">Jisajili</button>
+          </div>
+          <form id="auth-form">
+            <div class="field">
+              <label>Namba ya simu</label>
+              <input id="f-phone" type="tel" placeholder="+255 7XX XXX XXX" autocomplete="tel" />
+            </div>
+            <div class="field" id="name-field" style="display:none;">
+              <label>Jina lako</label>
+              <input id="f-name" placeholder="mfano: Ptronilla" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>PIN (namba 4+)</label>
+              <input id="f-pin" type="password" inputmode="numeric" placeholder="••••" />
+            </div>
+            <div class="field" id="lang-field" style="display:none;">
+              <label>Lugha yako</label>
+              <div class="lang-grid" id="lang-grid"></div>
+            </div>
+            <p class="error-text" id="auth-error" style="display:none;"></p>
+            <button type="submit" class="btn-primary" id="auth-submit">Ingia</button>
+          </form>
+        </div>
       </div>
     </div>
   `;
   root.appendChild(wrap);
-  const card = wrap.querySelector("#auth-card");
 
-  function showError(msg) {
-    let el = card.querySelector(".error-text");
-    if (!el) { el = document.createElement("p"); el.className = "error-text"; card.querySelector("form").appendChild(el); }
-    el.textContent = msg;
-  }
-  function clearError() { const el = card.querySelector(".error-text"); if (el) el.remove(); }
-
-  function renderPhoneStep() {
-    step = "phone";
-    card.innerHTML = `
-      <form id="phone-form">
-        <div class="field">
-          <label>Namba ya simu</label>
-          <input id="f-phone" type="tel" placeholder="+255 7XX XXX XXX" autocomplete="tel" />
-        </div>
-        <p class="hint-text">Tutakutumia msimbo (OTP) kwa SMS kuthibitisha namba yako.</p>
-        <button type="submit" class="btn-primary" id="phone-submit">Tuma OTP</button>
-      </form>
-    `;
-    card.querySelector("#phone-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearError();
-      const raw = card.querySelector("#f-phone").value.trim();
-      if (!raw || raw.replace(/\D/g, "").length < 9) { showError("Ingiza namba sahihi ya simu, ikiwa na msimbo wa nchi (+255...)"); return; }
-      phone = raw.startsWith("+") ? raw : "+" + raw.replace(/\D/g, "");
-      const btn = card.querySelector("#phone-submit");
-      btn.disabled = true; btn.textContent = "Inatuma...";
-      try {
-        const { error } = await sb.auth.signInWithOtp({ phone });
-        if (error) throw new Error(error.message);
-        renderOtpStep();
-      } catch (err) {
-        showError("Imeshindikana kutuma OTP: " + err.message);
-      } finally {
-        btn.disabled = false; btn.textContent = "Tuma OTP";
-      }
+  const langGrid = wrap.querySelector("#lang-grid");
+  Object.entries(LANGS).forEach(([code, l]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "lang-btn" + (code === lang ? " active" : "");
+    b.textContent = l.label;
+    b.dataset.lang = code;
+    b.addEventListener("click", () => {
+      lang = code;
+      langGrid.querySelectorAll(".lang-btn").forEach((el) => el.classList.toggle("active", el.dataset.lang === lang));
     });
-  }
+    langGrid.appendChild(b);
+  });
 
-  function renderOtpStep() {
-    step = "otp";
-    card.innerHTML = `
-      <p class="hint-text" style="margin-bottom:10px;">Tumetuma msimbo wa namba 6 kwa <strong>${esc(phone)}</strong></p>
-      <form id="otp-form">
-        <div class="field">
-          <label>Ingiza OTP</label>
-          <input id="f-otp" class="otp-input" inputmode="numeric" maxlength="6" placeholder="••••••" />
-        </div>
-        <button type="submit" class="btn-primary" id="otp-submit">Thibitisha</button>
-        <button type="button" class="btn-link" id="otp-back">Badilisha namba ya simu</button>
-      </form>
-    `;
-    card.querySelector("#otp-back").addEventListener("click", renderPhoneStep);
-    card.querySelector("#otp-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearError();
-      const code = card.querySelector("#f-otp").value.trim();
-      if (code.length < 4) { showError("Ingiza OTP sahihi"); return; }
-      const btn = card.querySelector("#otp-submit");
-      btn.disabled = true; btn.textContent = "Inathibitisha...";
-      try {
-        const { data, error } = await sb.auth.verifyOtp({ phone, token: code, type: "sms" });
-        if (error) throw new Error(error.message);
-        const authId = data.session.user.id;
-        const { data: rows, error: rpcErr } = await sb.rpc("upsert_phone_profile", {
-          p_auth_id: authId, p_phone: phone, p_name: null, p_language: null,
-        });
-        if (rpcErr) throw new Error(rpcErr.message);
-        const row = rows && rows[0];
-        if (row && !row.is_new) {
-          const user = { id: row.id, auth_id: authId, name: row.name, preferred_language: row.preferred_language };
-          localStorage.setItem("poachat_user", JSON.stringify(user));
-          state.user = user;
-          render();
-        } else {
-          renderProfileStep(authId);
-        }
-      } catch (err) {
-        showError("OTP si sahihi au imeisha muda: " + err.message);
-      } finally {
-        btn.disabled = false; btn.textContent = "Thibitisha";
-      }
+  const tabBtns = wrap.querySelectorAll(".tabbar button");
+  const nameField = wrap.querySelector("#name-field");
+  const langField = wrap.querySelector("#lang-field");
+  const submitBtn = wrap.querySelector("#auth-submit");
+  tabBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      mode = btn.dataset.mode;
+      tabBtns.forEach((b) => b.classList.toggle("active", b === btn));
+      nameField.style.display = mode === "signup" ? "block" : "none";
+      langField.style.display = mode === "signup" ? "block" : "none";
+      submitBtn.textContent = mode === "signup" ? "Jisajili" : "Ingia";
     });
-  }
+  });
 
-  function renderProfileStep(authId) {
-    step = "profile";
-    card.innerHTML = `
-      <p class="hint-text" style="margin-bottom:10px;">Karibu! Jaza jina lako na lugha unayopenda.</p>
-      <form id="profile-form">
-        <div class="field">
-          <label>Jina lako</label>
-          <input id="f-name" placeholder="mfano: Ptronilla" autocomplete="off" />
-        </div>
-        <div class="field">
-          <label>Lugha yako</label>
-          <div class="lang-grid" id="lang-grid"></div>
-        </div>
-        <button type="submit" class="btn-primary" id="profile-submit">Maliza usajili</button>
-      </form>
-    `;
-    const langGrid = card.querySelector("#lang-grid");
-    Object.entries(LANGS).forEach(([code, l]) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "lang-btn" + (code === lang ? " active" : "");
-      b.textContent = l.label;
-      b.dataset.lang = code;
-      b.addEventListener("click", () => {
-        lang = code;
-        langGrid.querySelectorAll(".lang-btn").forEach((el) => el.classList.toggle("active", el.dataset.lang === lang));
-      });
-      langGrid.appendChild(b);
-    });
-    card.querySelector("#profile-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearError();
-      const name = card.querySelector("#f-name").value.trim();
-      if (!name) { showError("Ingiza jina lako"); return; }
-      const btn = card.querySelector("#profile-submit");
-      btn.disabled = true; btn.textContent = "Inasubiri...";
-      try {
-        const { data: rows, error } = await sb.rpc("upsert_phone_profile", {
-          p_auth_id: authId, p_phone: phone, p_name: name, p_language: lang,
-        });
+  const errorEl = wrap.querySelector("#auth-error");
+  const form = wrap.querySelector("#auth-form");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorEl.style.display = "none";
+    const rawPhone = wrap.querySelector("#f-phone").value.trim();
+    const pin = wrap.querySelector("#f-pin").value;
+    if (!rawPhone || rawPhone.replace(/\D/g, "").length < 9) {
+      errorEl.textContent = "Ingiza namba sahihi ya simu, ikiwa na msimbo wa nchi (+255...)";
+      errorEl.style.display = "block";
+      return;
+    }
+    if (pin.length < 4) {
+      errorEl.textContent = "PIN iwe angalau namba 4";
+      errorEl.style.display = "block";
+      return;
+    }
+    const phone = rawPhone.startsWith("+") ? rawPhone : "+" + rawPhone.replace(/\D/g, "");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Inasubiri...";
+    try {
+      if (mode === "signup") {
+        const name = wrap.querySelector("#f-name").value.trim();
+        if (!name) { throw new Error("Ingiza jina lako"); }
+        const { data, error } = await sb.rpc("signup_user_phone", { p_phone: phone, p_pin: pin, p_name: name, p_language: lang });
         if (error) throw new Error(error.message);
-        const row = rows[0];
-        const user = { id: row.id, auth_id: authId, name: row.name, preferred_language: row.preferred_language };
+        const row = data && data[0];
+        if (!row || !row.success) throw new Error(row?.error_message || "Imeshindikana kujisajili");
+        const user = { id: row.user_id, phone, name, preferred_language: lang };
         localStorage.setItem("poachat_user", JSON.stringify(user));
         state.user = user;
         render();
-      } catch (err) {
-        showError("Hitilafu: " + err.message);
-      } finally {
-        btn.disabled = false; btn.textContent = "Maliza usajili";
+      } else {
+        const { data, error } = await sb.rpc("verify_user_pin_phone", { p_phone: phone, p_pin: pin });
+        if (error) throw new Error(error.message);
+        const row = data && data[0];
+        if (!row || !row.valid) throw new Error("Namba ya simu au PIN si sahihi");
+        const user = { id: row.user_id, phone, name: row.name, preferred_language: row.preferred_language };
+        localStorage.setItem("poachat_user", JSON.stringify(user));
+        state.user = user;
+        render();
       }
-    });
-  }
-
-  renderPhoneStep();
+    } catch (err) {
+      errorEl.textContent = err.message || "Hitilafu. Jaribu tena.";
+      errorEl.style.display = "block";
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = mode === "signup" ? "Jisajili" : "Ingia";
+    }
+  });
 }
 
 /* ================= Chat List Screen ================= */
